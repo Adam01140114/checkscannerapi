@@ -1,212 +1,374 @@
+// bridge.js
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const { Readable } = require("stream");
+const crypto = require("crypto");
 
 const app = express();
+
 const PORT = 5055;
 const SCANNER_HOST = "http://192.168.101.1";
 
-let appInstId = "D27CDB6E-AE6D-11cf-96B8-444553540000";
+const DATA_DIR = __dirname;
+const CHECKS_FILE = path.join(DATA_DIR, "checks.json");
+const APPINST_FILE = path.join(DATA_DIR, "appinstid.txt");
+
+app.use(express.json({ limit: "2mb" }));
+
 let phpSessId = null;
 
-function setCors(res) {
+// -------------------- persistence helpers --------------------
+function readTextFileSafe(p) {
+  try {
+    const s = fs.readFileSync(p, "utf8").trim();
+    return s || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTextFileSafe(p, s) {
+  try {
+    fs.writeFileSync(p, s, "utf8");
+  } catch {}
+}
+
+function isGuidLike(s) {
+  if (!s || typeof s !== "string") return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+let appInstId = readTextFileSafe(APPINST_FILE) || crypto.randomUUID();
+writeTextFileSafe(APPINST_FILE, appInstId);
+
+function setAppInstId(newId, reason = "") {
+  if (!isGuidLike(newId)) return false;
+  if (newId.toLowerCase() === appInstId.toLowerCase()) return false;
+
+  appInstId = newId;
+  writeTextFileSafe(APPINST_FILE, appInstId);
+  console.log(`Learned AppInstId (${reason}): ${appInstId}`);
+  return true;
+}
+
+function loadChecks() {
+  try {
+    return JSON.parse(fs.readFileSync(CHECKS_FILE, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveChecks(list) {
+  fs.writeFileSync(CHECKS_FILE, JSON.stringify(list, null, 2));
+}
+
+let checks = loadChecks();
+
+// -------------------- CORS --------------------
+app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-}
-
-function streamFetchBodyToRes(fetchResponse, res) {
-  if (!fetchResponse.body) return res.end();
-  const nodeStream = Readable.fromWeb(fetchResponse.body);
-  nodeStream.on("error", () => res.end());
-  nodeStream.pipe(res);
-}
-
-async function readIncomingBody(req) {
-  // Only for methods that can have a body
-  if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return null;
-
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  if (chunks.length === 0) return null;
-  return Buffer.concat(chunks);
-}
-
-app.use((req, res, next) => {
-  setCors(res);
   if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
-  const incoming =
-    req.headers["appinstid"] ||
-    req.query.AppInstId ||
-    req.query.appInstId ||
-    req.query.appinstid;
+// -------------------- learn AppInstId from incoming browser requests --------------------
+app.use((req, res, next) => {
+  const hdr = req.headers["appinstid"];
+  if (typeof hdr === "string" && isGuidLike(hdr)) setAppInstId(hdr, "request header");
 
-  if (incoming && typeof incoming === "string" && incoming.length >= 8) {
-    if (incoming !== appInstId) {
-      console.log("Learned AppInstId:", incoming);
-      appInstId = incoming;
-    }
-  }
+  const q = req.query?.AppInstId || req.query?.appInstId || req.query?.appinstid;
+  if (typeof q === "string" && isGuidLike(q)) setAppInstId(q, "querystring");
 
   next();
 });
 
-function buildScannerUrl(path, req) {
-  const url = new URL(`${SCANNER_HOST}${path}`);
-
-  // copy query params exactly
-  for (const [k, v] of Object.entries(req.query || {})) {
-    url.searchParams.set(k, v);
-  }
-
-  // ensure AppInstId exists
-  if (!url.searchParams.has("AppInstId")) {
-    url.searchParams.set("AppInstId", appInstId);
-  }
-
-  return url.toString();
+// -------------------- scanner fetch helpers --------------------
+function captureSetCookie(setCookieHeader) {
+  if (!setCookieHeader) return;
+  const m = setCookieHeader.match(/PHPSESSID=([^;]+)/);
+  if (m) phpSessId = m[1];
 }
 
 function scannerHeaders(req, extra = {}) {
   const h = {
-    AppInstId: appInstId,
-    Referer: `${SCANNER_HOST}/index.html`,
     Accept: "*/*",
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
+    Referer: `${SCANNER_HOST}/index.html`,
+    AppInstId: appInstId,
     ...extra,
   };
-
-  // Forward content-type if browser sent one (needed for POST endpoints)
-  const ct = req.headers["content-type"];
-  if (ct) h["Content-Type"] = ct;
-
-  // Some scanners care about X-Requested-With (XHR)
-  if (req.headers["x-requested-with"]) {
-    h["X-Requested-With"] = req.headers["x-requested-with"];
-  } else {
-    h["X-Requested-With"] = "XMLHttpRequest";
-  }
-
   if (phpSessId) h.Cookie = `PHPSESSID=${phpSessId}`;
   return h;
 }
 
-async function fetchScanner(req, path, extraHeaders = {}) {
-  const url = buildScannerUrl(path, req);
+function withAppInstQuery(scannerPath) {
+  if (!scannerPath || typeof scannerPath !== "string") return scannerPath;
+  if (!appInstId) return scannerPath;
+  if (scannerPath.includes("AppInstId=")) return scannerPath;
 
-  const body = await readIncomingBody(req);
+  const joiner = scannerPath.includes("?") ? "&" : "?";
+  return `${scannerPath}${joiner}AppInstId=${encodeURIComponent(appInstId)}`;
+}
 
-  const opts = {
-    method: req.method || "GET",
-    headers: scannerHeaders(req, extraHeaders),
-    body: body ?? undefined,
-  };
+async function fetchScanner(req, scannerPath, opts = {}) {
+  const finalPath = withAppInstQuery(scannerPath);
+  const url = `${SCANNER_HOST}${finalPath}`;
 
-  const r = await fetch(url, opts);
+  const r = await fetch(url, {
+    method: opts.method || req.method,
+    headers: scannerHeaders(req, opts.headers || {}),
+    body: opts.body,
+  });
 
   const setCookie = r.headers.get("set-cookie");
-  if (setCookie) {
-    const m = setCookie.match(/PHPSESSID=([^;]+)/);
-    if (m) phpSessId = m[1];
+  if (setCookie) captureSetCookie(setCookie);
+
+  return r;
+}
+
+function streamFetchToRes(r, res) {
+  res.status(r.status);
+  const ct = r.headers.get("content-type");
+  if (ct) res.setHeader("Content-Type", ct);
+
+  if (!r.body) return res.end();
+
+  const nodeStream = Readable.fromWeb(r.body);
+  nodeStream.pipe(res);
+}
+
+// -------------------- EverneXt parsing --------------------
+function getDocs(state) {
+  if (!state || typeof state !== "object") return [];
+  if (Array.isArray(state.Documents)) return state.Documents;
+  if (Array.isArray(state.Document)) return state.Document;
+  if (Array.isArray(state.Docs)) return state.Docs;
+  if (Array.isArray(state.DocList)) return state.DocList;
+  return [];
+}
+
+function parseMicr(micr) {
+  if (!micr) return { routing: "", account: "", checkNumber: "" };
+
+  // Example: <066410<:121102036:0066000048<
+  const routingMatch = micr.match(/<(\d{9})<:/);
+  const routing = routingMatch ? routingMatch[1] : "";
+
+  const parts = micr.split(":");
+  let account = "";
+  let checkNumber = "";
+
+  if (parts.length >= 3) {
+    account = (parts[1] || "").replace(/\D/g, "");
+    checkNumber = (parts[2] || "").replace(/\D/g, "");
   }
 
-  return { r, url };
+  return { routing, account, checkNumber };
 }
 
-async function primeSession() {
-  const fakeReq = {
-    method: "GET",
-    query: {},
-    headers: { "x-requested-with": "XMLHttpRequest" },
-    [Symbol.asyncIterator]: async function* () {},
-  };
+function upsertDocsIntoChecks(stateJson) {
+  const docs = getDocs(stateJson);
 
-  await fetchScanner(fakeReq, "/setup.php", { Referer: `${SCANNER_HOST}/setup.php` });
-  await fetchScanner(fakeReq, "/index.html", { Referer: `${SCANNER_HOST}/index.html` });
+  for (const d of docs) {
+    const id = String(d.ID ?? d.Id ?? "");
+    if (!id) continue;
+
+    const existing = checks.find((x) => x.id === id);
+    const micr = parseMicr(d.MICR);
+
+    const record = {
+      id,
+      type: d.Type || "",
+      micr: d.MICR || "",
+      routing: micr.routing,
+      account: micr.account,
+      checkNumber: micr.checkNumber,
+      frontImage: d.FrontImage1 || "",
+      rearImage: d.RearImage1 || "",
+      amount: existing?.amount || "",
+      scannedAt: existing?.scannedAt || new Date().toISOString(),
+    };
+
+    if (!existing) checks.unshift(record);
+    else Object.assign(existing, record);
+  }
+
+  saveChecks(checks);
 }
 
-primeSession().catch(() => {});
+// -------------------- session priming --------------------
+async function primeSession(req) {
+  // setup.php reliably sets PHPSESSID
+  await fetchScanner(req, "/setup.php", { method: "GET" });
+}
 
+async function connectIfNeeded(req) {
+  try {
+    await fetchScanner(req, "/connect", { method: "GET" });
+  } catch {}
+}
+
+async function getStateJson(req) {
+  const r = await fetchScanner(req, "/currentdevicestateex", { method: "GET" });
+  const text = await r.text();
+  try {
+    return { ok: true, status: r.status, json: JSON.parse(text), raw: text };
+  } catch {
+    return { ok: false, status: r.status, json: null, raw: text };
+  }
+}
+
+// -------------------- routes --------------------
 app.get("/", (req, res) => {
   res.json({
-    ui: `http://localhost:${PORT}/ui`,
+    ok: true,
+    dashboard: `http://localhost:${PORT}/dashboard`,
+    ui: `http://localhost:${PORT}/ui/`,
     appInstId,
     hasSession: !!phpSessId,
   });
 });
 
-// Serve UI without redirect loops
-app.get(["/ui", "/ui/"], async (req, res) => {
-  const { r } = await fetchScanner(req, "/index.html");
-  const html = await r.text();
-  const patched = html.replace(/<head>/i, `<head><base href="/ui/">`);
-
-  res.status(r.status);
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(patched);
+app.get("/dashboard", (req, res) => {
+  res.sendFile(path.join(__dirname, "dashboard.html"));
 });
 
-// Proxy everything under /ui
+app.get("/api/init", async (req, res) => {
+  try {
+    await primeSession(req);
+    await connectIfNeeded(req);
+
+    const st = await getStateJson(req);
+
+    res.json({
+      ok: true,
+      appInstId,
+      hasSession: !!phpSessId,
+      stateStatus: st.status,
+      stateOkJson: st.ok,
+      statePreview: st.ok ? { keys: Object.keys(st.json || {}) } : st.raw.slice(0, 200),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/api/checks", async (req, res) => {
+  try {
+    if (!phpSessId) await primeSession(req);
+    await connectIfNeeded(req);
+
+    const st = await getStateJson(req);
+
+    if (st.ok && st.json) upsertDocsIntoChecks(st.json);
+
+    res.json({
+      ok: true,
+      appInstId,
+      hasSession: !!phpSessId,
+      stateStatus: st.status,
+      stateIsJson: st.ok,
+      checks,
+      lastRaw: st.ok ? null : st.raw,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/api/image", async (req, res) => {
+  try {
+    const imgPath = req.query.path;
+    if (!imgPath || typeof imgPath !== "string" || !imgPath.startsWith("/images/")) {
+      return res.status(400).send("Missing or invalid path (must start with /images/)");
+    }
+    if (!phpSessId) await primeSession(req);
+
+    const r = await fetchScanner(req, imgPath, { method: "GET" });
+    streamFetchToRes(r, res);
+  } catch (e) {
+    res.status(500).send(String(e));
+  }
+});
+
+// -------------------- UI reverse proxy --------------------
 app.use("/ui", async (req, res) => {
-  let path = req.originalUrl.replace(/^\/ui/, "");
-  if (!path || path === "/") path = "/index.html";
+  try {
+    if (!phpSessId) await primeSession(req);
 
-  const { r } = await fetchScanner(req, path);
+    const subPath = req.originalUrl.replace(/^\/ui/, "") || "/";
+    const scannerPath = subPath === "/" ? "/index.html" : subPath;
 
-  const ct = r.headers.get("content-type") || "";
-  res.status(r.status);
-  if (ct) res.setHeader("Content-Type", ct);
+    const r = await fetchScanner(req, scannerPath, { method: "GET" });
 
-  if (ct.includes("text/html")) {
-    const html = await r.text();
-    const patched = html.replace(/<head>/i, `<head><base href="/ui/">`);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.send(patched);
+    const ct = r.headers.get("content-type") || "";
+
+    if (scannerPath === "/index.html" || ct.includes("text/html")) {
+      const html = await r.text();
+      const rewritten = html
+        .replace(/href="\//g, 'href="/ui/')
+        .replace(/src="\//g, 'src="/ui/')
+        .replace(/action="\//g, 'action="/ui/');
+
+      res.setHeader("Content-Type", "text/html");
+      return res.send(rewritten);
+    }
+
+    streamFetchToRes(r, res);
+  } catch (e) {
+    res.status(500).send(String(e));
   }
-
-  if (!r.ok && ct.includes("text")) {
-    return res.send(await r.text());
-  }
-
-  streamFetchBodyToRes(r, res);
 });
 
-// Proxy scanner endpoints that the UI calls from root paths
-const ROOT_PROXY_PREFIXES = [
-  "/skins/",
-  "/images/",
-  "/currentdevicestate",
-  "/currentdevicestateex",
-  "/deviceinformation",
-  "/logstatus",
-  "/connect",
-  "/scan",
-  "/userdata/",
-  "/time",
-  "/usermsg",
-  "/removeitemrange",
-  "/removeitem",
-  "/removeitems",
-];
-
+// -------------------- Proxy root endpoints (UI expects /connect, /logstatus, etc) --------------------
 app.use(async (req, res, next) => {
-  const hit = ROOT_PROXY_PREFIXES.some((p) => req.path === p || req.path.startsWith(p));
-  if (!hit) return next();
-
-  const { r } = await fetchScanner(req, req.originalUrl);
-
-  const ct = r.headers.get("content-type") || "";
-  res.status(r.status);
-  if (ct) res.setHeader("Content-Type", ct);
-
-  if (!r.ok && ct.includes("text")) {
-    return res.send(await r.text());
+  if (
+    req.path.startsWith("/api") ||
+    req.path.startsWith("/ui") ||
+    req.path === "/dashboard" ||
+    req.path === "/"
+  ) {
+    return next();
   }
 
-  streamFetchBodyToRes(r, res);
+  try {
+    if (!phpSessId) await primeSession(req);
+
+    const qs = req.originalUrl.includes("?")
+      ? req.originalUrl.slice(req.originalUrl.indexOf("?"))
+      : "";
+
+    const scannerPath = `${req.path}${qs}`;
+
+    const r = await fetchScanner(req, scannerPath, {
+      method: req.method,
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
+      headers: ["GET", "HEAD"].includes(req.method)
+        ? {}
+        : { "Content-Type": req.headers["content-type"] || "application/json" },
+    });
+
+    const ct = r.headers.get("content-type") || "";
+    if (ct.includes("text/") || ct.includes("json")) {
+      const text = await r.text();
+      res.status(r.status);
+      if (ct) res.setHeader("Content-Type", ct);
+      return res.send(text);
+    }
+
+    streamFetchToRes(r, res);
+  } catch (e) {
+    res.status(500).send(String(e));
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`Bridge running on http://localhost:${PORT}`);
-  console.log(`Open UI through bridge: http://localhost:${PORT}/ui`);
+  console.log(`UI: http://localhost:${PORT}/ui/`);
+  console.log(`Dashboard: http://localhost:${PORT}/dashboard`);
+  console.log(`AppInstId (persistent): ${appInstId}`);
 });

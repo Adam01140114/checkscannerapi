@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Check Scan Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    .top { display: flex; align-items: center; gap: 16px; }
+    .pill { padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; font-size: 14px; }
+    .grid { margin-top: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 16px; }
+    .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 12px; }
+    .row { display: flex; gap: 12px; align-items: flex-start; }
+    img { width: 200px; height: auto; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+    .meta { font-size: 14px; line-height: 1.35; }
+    .label { color: #666; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .small { font-size: 12px; color: #777; margin-top: 6px; }
+    .warn { color: #b00020; }
+    button { padding: 8px 12px; border-radius: 10px; border: 1px solid #ddd; background: white; cursor: pointer; }
+    button:hover { background: #f7f7f7; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1 style="margin:0;">Check Scan Dashboard</h1>
+    <div id="status" class="pill">Loading...</div>
+    <div class="pill">Auto refresh: <span class="mono">1s</span></div>
+    <button id="initBtn">Init (prime + connect)</button>
+  </div>
+
+  <div id="sub" class="small"></div>
+  <div id="grid" class="grid"></div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const subEl = document.getElementById("sub");
+    const gridEl = document.getElementById("grid");
+    const initBtn = document.getElementById("initBtn");
+
+    async function init() {
+      statusEl.textContent = "Init running...";
+      const r = await fetch("/api/init");
+      const j = await r.json();
+      statusEl.textContent = j.ok
+        ? `Session: ${j.hasSession ? "OK" : "NO"} | AppInstId: ${j.appInstId || "?"}`
+        : `Init failed`;
+      subEl.textContent = j.ok
+        ? `stateStatus=${j.stateStatus}, stateIsJson=${j.stateOkJson}`
+        : (j.error || "unknown");
+    }
+
+    function cardHtml(c) {
+      const front = c.frontImage ? `/api/image?path=${encodeURIComponent(c.frontImage)}` : "";
+      const rear  = c.rearImage  ? `/api/image?path=${encodeURIComponent(c.rearImage)}`  : "";
+
+      return `
+        <div class="card">
+          <div class="row">
+            <div>
+              ${front ? `<img src="${front}" alt="front" />` : `<div class="warn">No front image</div>`}
+              <div class="small mono">Doc ID: ${c.id}</div>
+            </div>
+            <div>
+              ${rear ? `<img src="${rear}" alt="rear" />` : `<div class="warn">No rear image</div>`}
+              <div class="small mono">Type: ${c.type || "-"}</div>
+            </div>
+          </div>
+          <div class="meta" style="margin-top:10px;">
+            <div><span class="label">Routing:</span> <span class="mono">${c.routing || "-"}</span></div>
+            <div><span class="label">Account:</span> <span class="mono">${c.account || "-"}</span></div>
+            <div><span class="label">Check #:</span> <span class="mono">${c.checkNumber || "-"}</span></div>
+            <div><span class="label">Amount:</span> <span class="mono">${c.amount || "-"}</span></div>
+            <div class="small"><span class="label">Scanned:</span> <span class="mono">${c.scannedAt || "-"}</span></div>
+            <div class="small"><span class="label">MICR:</span> <span class="mono">${(c.micr || "").slice(0, 120)}</span></div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function tick() {
+      try {
+        const r = await fetch("/api/checks", { cache: "no-store" });
+        const j = await r.json();
+
+        statusEl.textContent = `Session: ${j.hasSession ? "OK" : "NO"} | AppInstId: ${j.appInstId || "?"} | Checks: ${j.checks?.length || 0}`;
+        subEl.textContent = `stateStatus=${j.stateStatus}, stateIsJson=${j.stateIsJson}${j.lastRaw ? " | lastRaw=" + j.lastRaw : ""}`;
+
+        const list = j.checks || [];
+        gridEl.innerHTML = list.map(cardHtml).join("");
+
+      } catch (e) {
+        statusEl.textContent = "Fetch error";
+        subEl.textContent = String(e);
+      }
+    }
+
+    initBtn.addEventListener("click", init);
+
+    // do one init on load, then start polling
+    init().then(() => {
+      tick();
+      setInterval(tick, 1000);
+    });
+  </script>
+</body>
+</html>
