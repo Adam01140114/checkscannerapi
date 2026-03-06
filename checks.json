@@ -6,21 +6,9 @@
     "routing": "",
     "account": "121102036",
     "checkNumber": "0066000048",
-    "frontImage": "/images/09243382-4af3-4981-a68d-93b9fb41ac86/Doc00001Front1.tif",
-    "rearImage": "/images/09243382-4af3-4981-a68d-93b9fb41ac86/Doc00001Rear1.tif",
+    "frontImage": "/images/13e87472-ce29-4c55-a9e7-9a23cfd680db/Doc00001Front1.tif",
+    "rearImage": "/images/13e87472-ce29-4c55-a9e7-9a23cfd680db/Doc00001Rear1.tif",
     "amount": "",
-    "scannedAt": "2026-03-06T02:53:48.977Z"
-  },
-  {
-    "id": "2",
-    "type": "Check",
-    "micr": "<066410<:121102036:0066000048<",
-    "routing": "",
-    "account": "121102036",
-    "checkNumber": "0066000048",
-    "frontImage": "/images/09243382-4af3-4981-a68d-93b9fb41ac86/Doc00002Front1.tif",
-    "rearImage": "/images/09243382-4af3-4981-a68d-93b9fb41ac86/Doc00002Rear1.tif",
-    "amount": "",
-    "scannedAt": "2026-03-06T02:53:48.977Z"
+    "scannedAt": "2026-03-06T03:14:35.723Z"
   }
 ]

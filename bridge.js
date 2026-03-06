@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { Readable } = require("stream");
 const crypto = require("crypto");
+const sharp = require("sharp");
 
 const app = express();
 
@@ -170,6 +171,21 @@ function parseMicr(micr) {
   return { routing, account, checkNumber };
 }
 
+// Try to learn the AppInstId that the device/UI thinks is active
+// by parsing it from /logstatus. This helps recover from
+// "Application connected to other instance" without power cycling.
+async function syncAppInstIdFromDevice() {
+  try {
+    const url = `${SCANNER_HOST}/logstatus`;
+    const r = await fetch(url, { method: "GET", headers: { Accept: "*/*" } });
+    const text = await r.text();
+    const m = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    if (m) setAppInstId(m[0], "logstatus");
+  } catch {
+    // best-effort only
+  }
+}
+
 function rebuildChecksFromState(stateJson) {
   const docs = getDocs(stateJson);
   const next = [];
@@ -200,7 +216,9 @@ function rebuildChecksFromState(stateJson) {
 
 // -------------------- session priming --------------------
 async function primeSession(req) {
-  // setup.php reliably sets PHPSESSID
+  // Try to learn the current AppInstId the device is using,
+  // then ensure we have a PHP session.
+  await syncAppInstIdFromDevice();
   await fetchScanner(req, "/setup.php", { method: "GET" });
 }
 
@@ -281,17 +299,28 @@ app.get("/api/checks", async (req, res) => {
 app.get("/api/image", async (req, res) => {
   try {
     const imgPath = req.query.path;
-    if (!imgPath || typeof imgPath !== "string" || !imgPath.startsWith("/images/")) {
-      return res.status(400).send("Missing or invalid path (must start with /images/)");
+    if (!imgPath || typeof imgPath !== "string") {
+      return res.status(400).send("Missing or invalid path");
     }
     if (!phpSessId) await primeSession(req);
 
-    // The scanner serves images via /image?path=<encoded scanner path>,
-    // not by requesting the /images/... file path directly.
-    const scannerPath = `/image?path=${encodeURIComponent(imgPath)}`;
+    // Mirror the same path pattern that the UI uses,
+    // e.g. "/images/<guid>/Doc00001Front1.tif"
+    const scannerPath = imgPath;
 
     const r = await fetchScanner(req, scannerPath, { method: "GET" });
-    streamFetchToRes(r, res);
+    if (r.status !== 200) {
+      res.status(r.status);
+      if (r.body) Readable.fromWeb(r.body).pipe(res);
+      else res.end();
+      return;
+    }
+
+    // Chrome cannot display TIFF in <img> tags. Convert to PNG so the dashboard can show it.
+    const buf = Buffer.from(await r.arrayBuffer());
+    const png = await sharp(buf).png().toBuffer();
+    res.setHeader("Content-Type", "image/png");
+    res.send(png);
   } catch (e) {
     res.status(500).send(String(e));
   }
