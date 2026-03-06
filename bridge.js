@@ -280,7 +280,13 @@ app.get("/api/checks", async (req, res) => {
 
     const st = await getStateJson(req);
 
-    if (st.ok && st.json) rebuildChecksFromState(st.json);
+    if (st.ok && st.json) {
+      // Persist latest state JSON so we can inspect fields (e.g. amount)
+      try {
+        fs.writeFileSync(path.join(DATA_DIR, "state.json"), JSON.stringify(st.json, null, 2));
+      } catch {}
+      rebuildChecksFromState(st.json);
+    }
 
     res.json({
       ok: true,
