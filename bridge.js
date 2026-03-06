@@ -170,17 +170,17 @@ function parseMicr(micr) {
   return { routing, account, checkNumber };
 }
 
-function upsertDocsIntoChecks(stateJson) {
+function rebuildChecksFromState(stateJson) {
   const docs = getDocs(stateJson);
+  const next = [];
 
   for (const d of docs) {
     const id = String(d.ID ?? d.Id ?? "");
     if (!id) continue;
 
-    const existing = checks.find((x) => x.id === id);
     const micr = parseMicr(d.MICR);
 
-    const record = {
+    next.push({
       id,
       type: d.Type || "",
       micr: d.MICR || "",
@@ -189,14 +189,12 @@ function upsertDocsIntoChecks(stateJson) {
       checkNumber: micr.checkNumber,
       frontImage: d.FrontImage1 || "",
       rearImage: d.RearImage1 || "",
-      amount: existing?.amount || "",
-      scannedAt: existing?.scannedAt || new Date().toISOString(),
-    };
-
-    if (!existing) checks.unshift(record);
-    else Object.assign(existing, record);
+      amount: d.Amount || "",
+      scannedAt: new Date().toISOString(),
+    });
   }
 
+  checks = next;
   saveChecks(checks);
 }
 
@@ -264,7 +262,7 @@ app.get("/api/checks", async (req, res) => {
 
     const st = await getStateJson(req);
 
-    if (st.ok && st.json) upsertDocsIntoChecks(st.json);
+    if (st.ok && st.json) rebuildChecksFromState(st.json);
 
     res.json({
       ok: true,
@@ -288,7 +286,11 @@ app.get("/api/image", async (req, res) => {
     }
     if (!phpSessId) await primeSession(req);
 
-    const r = await fetchScanner(req, imgPath, { method: "GET" });
+    // The scanner serves images via /image?path=<encoded scanner path>,
+    // not by requesting the /images/... file path directly.
+    const scannerPath = `/image?path=${encodeURIComponent(imgPath)}`;
+
+    const r = await fetchScanner(req, scannerPath, { method: "GET" });
     streamFetchToRes(r, res);
   } catch (e) {
     res.status(500).send(String(e));
